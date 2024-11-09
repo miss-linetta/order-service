@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  mysqlservice:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: orderService
+      MYSQL_USER: mysql
+      MYSQL_PASSWORD: admin
+      MYSQL_ROOT_PASSWORD: admin
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  orderservice:
+    build: .
+    ports:
+      - "3001:8080"
+    depends_on:
+      - mysqlservice
