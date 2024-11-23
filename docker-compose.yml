@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # MySQL Service
   mysqlservice:
     image: mysql:8.0
     restart: always
@@ -14,9 +15,24 @@ services:
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
+  # Order Service
   orderservice:
-    build: .
+    build: ./order-service
     ports:
       - "3001:8080"
     depends_on:
       - mysqlservice
+      - confirmation-service
+    environment:
+      CONFIRMATION_SERVICE_URL: http://confirmation-service:9090
+      DB_HOST: mysqlservice
+      DB_PORT: 3306
+      DB_USER: mysql
+      DB_PASSWORD: admin
+      DB_NAME: orderService
+
+  # Confirmation Service
+  confirmation-service:
+    build: ./confirmation-service
+    ports:
+      - "9090:9090"

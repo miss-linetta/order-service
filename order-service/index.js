@@ -4,8 +4,8 @@ import bodyParser from 'body-parser'
 import pool from './dbConnection.js'
 import cors from 'cors'
 import { STATUS_BAD_REQUEST, STATUS_CREATED, STATUS_NOT_FOUND, STATUS_OK } from './utils/status.js'
-import { validTransitions } from './utils/state.js'
-import { randomBytes } from 'crypto'
+import { STATE_CONFIRMED, STATE_CREATED, validTransitions } from './utils/state.js'
+import axios from 'axios'
 
 dotenv.config({ path: './.env' })
 
@@ -21,7 +21,6 @@ app.post('/orders', async (req, res) => {
   const price = 0
 
   try {
-    // Input validation
     if (!name || typeof name !== 'string') {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid or missing name' })
     }
@@ -33,8 +32,7 @@ app.post('/orders', async (req, res) => {
     if (amount == null || typeof amount !== 'number' || amount <= 0) {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid or missing amount. It must be a positive number.' })
     }
-
-    // Insert the new order into the database
+    
     const [result] = await pool.query(
       'INSERT INTO orders (Name, ISIN, Amount, Price, State) VALUES (?, ?, ?, ?, ?)',
       [name, isin, amount, price, state]
@@ -101,12 +99,10 @@ app.patch('/orders/:id/amount', async (req, res) => {
   const { amount } = req.body
 
   try {
-    // Validate new amount
     if (typeof amount !== 'number' || amount <= 0) {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid amount. It must be a positive number.' })
     }
 
-    // Retrieve the order from the database
     const [orderResult] = await pool.query('SELECT * FROM orders WHERE ID = ?', [id])
 
     if (orderResult.length === 0) {
@@ -115,18 +111,14 @@ app.patch('/orders/:id/amount', async (req, res) => {
 
     const order = orderResult[0]
 
-    // Convert State to an integer to ensure correct comparison
     const orderState = parseInt(order.State, 10)
 
-    // Allow modifications only if the state is 0
-    if (orderState !== 0) {
+    if (orderState !== STATE_CREATED) {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Order cannot be modified in its current state.' })
     }
 
-    // Update the amount in the database
     await pool.query('UPDATE orders SET Amount = ? WHERE ID = ?', [amount, id])
 
-    // Log success and respond with the updated order
     console.info(`Order amount updated: ID ${id}, New Amount: ${amount}`)
     res.status(STATUS_OK).send({ ...order, Amount: amount })
   } catch (error) {
@@ -134,6 +126,17 @@ app.patch('/orders/:id/amount', async (req, res) => {
     res.status(STATUS_BAD_REQUEST).send({ error: 'Error updating the order' })
   }
 })
+
+// PATCH: Update Order State
+async function callConfirmationService (isin) {
+  try {
+    const response = await axios.get(`http://confirmation-service:9090/confirmation/${isin}?isin=${isin}`)
+    return response.data
+  } catch (error) {
+    console.error('Call to confirmation service could not be completed:', error.message)
+    throw new Error('Error during confirmation service call.')
+  }
+}
 
 // PATCH: Update Order State
 app.patch('/orders/:id/state', async (req, res) => {
@@ -148,19 +151,72 @@ app.patch('/orders/:id/state', async (req, res) => {
     }
 
     const order = orderResult[0]
-    const validNextStates = validTransitions[order.State]
-    if (!validNextStates || !validNextStates.includes(state)) {
+    const currentState = order.State !== undefined ? Number(order.State) : NaN
+
+    if (isNaN(currentState)) {
+      console.error(`Invalid or missing state for Order ID ${id}: ${order.State}`)
+      return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid current state in database.' })
+    }
+
+    const validNextStates = validTransitions[currentState]
+
+    if (!validNextStates) {
+      console.error(`No valid transitions for state ${currentState}`)
+      return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid current state.' })
+    }
+
+    if (!validNextStates.includes(state)) {
+      console.warn(`Invalid state transition: Current State: ${currentState}, Desired State: ${state}`)
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid state transition.' })
     }
 
-    await pool.query('UPDATE orders SET State = ? WHERE ID = ?', [state, id])
+    if (currentState === 0 && state === 1) {
+      try {
+        console.log(order.ISIN)
+        const confirmationResult = await callConfirmationService(order.ISIN)
+        console.log('Confirmation Service Response:', confirmationResult)
 
+        if (confirmationResult.confirmed) {
+          const price = Object.values(confirmationResult.price)[0]
+          console.log('Extracted Price:', price)
+
+          const updateResult = await pool.query('UPDATE orders SET State = ?, Price = ? WHERE ID = ?', [
+            state,
+            price,
+            id,
+          ])
+
+          const [updatedOrderResult] = await pool.query('SELECT * FROM orders WHERE ID = ?', [id])
+          const updatedOrder = updatedOrderResult[0]
+          console.log('Updated Order:', updatedOrder)
+
+          order.State = updatedOrder.State
+          order.Price = updatedOrder.Price
+
+          console.info(`Order state updated to confirmed: ID ${id}`)
+          return res.status(STATUS_OK).send(order)
+        } else {
+          return res
+            .status(STATUS_BAD_REQUEST)
+            .send({ error: 'Confirmation failed. Order not updated.' })
+        }
+
+      } catch (error) {
+        console.error('Error during confirmation:', error.message)
+        return res
+          .status(STATUS_BAD_REQUEST)
+          .send({ error: 'Error during confirmation. Order not updated.' })
+      }
+    }
+
+    await pool.query('UPDATE orders SET State = ? WHERE ID = ?', [state, id])
     order.State = state
+
     console.info(`Order state updated: ID ${id}, New State: ${state}`)
     res.status(STATUS_OK).send(order)
   } catch (error) {
-    console.error('Error updating the order state:', error)
-    res.status(STATUS_BAD_REQUEST).send({ error: 'Error updating the order state' })
+    console.error('Error updating the order state:', error.message)
+    return res.status(STATUS_BAD_REQUEST).send({ error: 'Failed to update state.' })
   }
 })
 
@@ -169,7 +225,6 @@ app.delete('/orders/:id', async (req, res) => {
   const { id } = req.params
 
   try {
-    // Retrieve the order from the database
     const [orderResult] = await pool.query('SELECT * FROM orders WHERE ID = ?', [id])
 
     if (orderResult.length === 0) {
@@ -178,14 +233,12 @@ app.delete('/orders/:id', async (req, res) => {
 
     const order = orderResult[0]
 
-    // Check if state is '0' or 0, depending on how it's stored in the DB
-    const orderState = parseInt(order.State, 10) // convert to integer
+    const orderState = parseInt(order.state, 10)
 
-    if (orderState !== 0) {
+    if (orderState !== STATE_CREATED && orderState !== STATE_CONFIRMED) {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Order cannot be deleted in its current state.' })
     }
 
-    // Delete the order from the database
     await pool.query('DELETE FROM orders WHERE ID = ?', [id])
 
     console.info(`Order deleted successfully: ID ${id}`)
