@@ -4,7 +4,7 @@ export const STATE_EXECUTED = 2
 export const STATE_SOLD = 3
 
 export const validTransitions = {
-  [STATE_CREATED]: [STATE_CONFIRMED], // Confirmation Service required
+  [STATE_CREATED]: [STATE_CONFIRMED],
   [STATE_CONFIRMED]: [STATE_EXECUTED],
   [STATE_EXECUTED]: [STATE_SOLD],
 }
