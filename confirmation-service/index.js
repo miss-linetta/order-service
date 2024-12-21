@@ -1,72 +1,101 @@
-import express from 'express'
-import bodyParser from 'body-parser'
-import cors from 'cors'
-import dotenv from 'dotenv'
-import { STATUS_BAD_REQUEST, STATUS_OK } from './utils/status.js'
+import * as grpc from '@grpc/grpc-js'
+import * as protoLoader from '@grpc/proto-loader'
 import axios from 'axios'
+import dotenv from 'dotenv'
 
 dotenv.config({ path: './.env' })
 
-const app = express()
+const PROTO_PATH = './confirmation.proto'
+const PORT = process.env.PORT || 4000
 
-app.use(bodyParser.json())
-app.use(cors())
+const packageDef = protoLoader.loadSync(PROTO_PATH, {})
+const gRPCObject = grpc.loadPackageDefinition(packageDef)
 
-// Asynchronous function to fetch price data from the external Price Service
+const confirmationPackage = gRPCObject.confirmation
+
 async function getPriceData (isin) {
   try {
     const response = await axios.get(
-      `https://onlineweiterbildung-reutlingen-university.de/vswsp4/index.php?isin=${isin}`
+      `https://onlineweiterbildung-reutlingen-university.de/vswsp5/index.php?isin=${isin}`
     )
-    return response.data
+
+    const priceData = response.data
+
+    if (
+      typeof priceData === 'object' &&
+      priceData !== null &&
+      Object.keys(priceData).length > 0
+    ) {
+
+      const price = parseFloat(Object.values(priceData)[0])
+
+      if (isNaN(price)) {
+        throw new Error('Price data is not a valid number.')
+      }
+
+      return price
+    } else {
+      throw new Error('Invalid price data structure.')
+    }
   } catch (error) {
     console.error('Price data could not be retrieved:', error.message)
     throw new Error('Error retrieving price data.')
   }
 }
 
-// GET: Confirmation Endpoint
-app.get('/confirmation/:isin', async (req, res) => {
-  const { isin } = req.query
+async function ConfirmOrder (call, callback) {
+  const { isin } = call.request
+
+  if (!isin) {
+    return callback({
+      code: grpc.status.INVALID_ARGUMENT,
+      details: 'ISIN is required.',
+    })
+  }
 
   try {
-    if (!isin) {
-      return res.status(STATUS_BAD_REQUEST).send({ error: 'ISIN is required.' })
-    }
-
     let confirmed = false
     let price = null
 
     try {
-      // Fetch price from the Price Service
+
       price = await getPriceData(isin)
-      confirmed = true // Set confirmed to true if price data is retrieved successfully
+      confirmed = true
     } catch (error) {
       console.warn('Error during price fetch; setting confirmed to false.')
     }
 
-    // Construct the response
     const result = {
       confirmed,
       price,
     }
 
     console.info(`Confirmation processed for ISIN ${isin}:`, result)
-    res.status(STATUS_OK).send(result)
+    return callback(null, result)
   } catch (error) {
     console.error('Error processing confirmation:', error.message)
-    res.status(STATUS_BAD_REQUEST).send({ error: error.message })
-  }
-})
-
-const PORT = process.env.PORT || 4000
-
-function start () {
-  try {
-    app.listen(PORT, () => console.info(`Server started on port ${PORT}`))
-  } catch (error) {
-    console.error('Error starting the server:', error)
+    return callback({
+      code: grpc.status.INTERNAL,
+      details: error.message,
+    })
   }
 }
 
-start()
+const server = new grpc.Server()
+
+server.addService(confirmationPackage.Confirmation.service, {
+  ConfirmOrder,
+})
+
+server.bindAsync(
+  `0.0.0.0:${PORT}`,
+  grpc.ServerCredentials.createInsecure(),
+  (error, bindAddress) => {
+    if (error) {
+      console.error(`Failed to bind server: ${error.message}`)
+      return
+    }
+    console.log(`gRPC Server is running at ${bindAddress}`)
+    server.start()
+  }
+)

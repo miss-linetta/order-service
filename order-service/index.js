@@ -5,7 +5,7 @@ import pool from './dbConnection.js'
 import cors from 'cors'
 import { STATUS_BAD_REQUEST, STATUS_CREATED, STATUS_NOT_FOUND, STATUS_OK } from './utils/status.js'
 import { STATE_CONFIRMED, STATE_CREATED, validTransitions } from './utils/state.js'
-import axios from 'axios'
+import { callConfirmationService } from './client.js'
 
 dotenv.config({ path: './.env' })
 
@@ -32,7 +32,7 @@ app.post('/orders', async (req, res) => {
     if (amount == null || typeof amount !== 'number' || amount <= 0) {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid or missing amount. It must be a positive number.' })
     }
-    
+
     const [result] = await pool.query(
       'INSERT INTO orders (Name, ISIN, Amount, Price, State) VALUES (?, ?, ?, ?, ?)',
       [name, isin, amount, price, state]
@@ -128,17 +128,6 @@ app.patch('/orders/:id/amount', async (req, res) => {
 })
 
 // PATCH: Update Order State
-async function callConfirmationService (isin) {
-  try {
-    const response = await axios.get(`http://confirmation-service:9090/confirmation/${isin}?isin=${isin}`)
-    return response.data
-  } catch (error) {
-    console.error('Call to confirmation service could not be completed:', error.message)
-    throw new Error('Error during confirmation service call.')
-  }
-}
-
-// PATCH: Update Order State
 app.patch('/orders/:id/state', async (req, res) => {
   const { id } = req.params
   const { state } = req.body
@@ -170,14 +159,13 @@ app.patch('/orders/:id/state', async (req, res) => {
       return res.status(STATUS_BAD_REQUEST).send({ error: 'Invalid state transition.' })
     }
 
-    if (currentState === 0 && state === 1) {
+    if (currentState === STATE_CREATED && state === STATE_CONFIRMED) {
       try {
-        console.log(order.ISIN)
         const confirmationResult = await callConfirmationService(order.ISIN)
         console.log('Confirmation Service Response:', confirmationResult)
 
         if (confirmationResult.confirmed) {
-          const price = Object.values(confirmationResult.price)[0]
+          const price = confirmationResult.price
           console.log('Extracted Price:', price)
 
           const updateResult = await pool.query('UPDATE orders SET State = ?, Price = ? WHERE ID = ?', [
@@ -200,7 +188,6 @@ app.patch('/orders/:id/state', async (req, res) => {
             .status(STATUS_BAD_REQUEST)
             .send({ error: 'Confirmation failed. Order not updated.' })
         }
-
       } catch (error) {
         console.error('Error during confirmation:', error.message)
         return res
@@ -247,6 +234,14 @@ app.delete('/orders/:id', async (req, res) => {
     console.error('Error deleting the order:', error)
     res.status(STATUS_BAD_REQUEST).send({ error: 'Error deleting the order' })
   }
+})
+
+app.get('/overload', async (req, res) => {
+  for (let i = 0; i < 100; i++) {
+    console.log(`------------------------- Log iteration: ${i} -------------------------`)
+    for (let j = 0; j < 100000; j++) {}
+  }
+  res.status(200).send('Success')
 })
 
 const PORT = process.env.PORT || 3000
